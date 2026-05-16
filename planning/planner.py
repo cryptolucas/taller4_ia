@@ -138,40 +138,38 @@ def forwardBFS(problem: Problem) -> list[Action]:
          avoid revisiting the same state twice (graph search, not tree search).
     """
     ### Your code here ###
-    initial_state = frozenset(problem.initial_state)
-    goal = frozenset(problem.goal)
+    initial_state = problem.initial_state
 
-    frontier = Queue()
-    frontier.push((initial_state, []))
+    if hasattr(problem, "isGoalState"):
+        if problem.isGoalState(initial_state):
+            return []
+    else:
+        goal = problem.goal if hasattr(problem, "goal") else problem.goal_state
+        if goal.issubset(initial_state):
+            return []
 
+    frontier = [(initial_state, [])]
     visited = set()
     visited.add(initial_state)
 
-    expanded = 0
+    while frontier:
+        state, plan = frontier.pop(0)
 
-    while not frontier.isEmpty():
-        state, plan = frontier.pop()
-        expanded += 1
+        for next_state, action, cost in problem.getSuccessors(state):
+            if next_state not in visited:
+                new_plan = plan + [action]
 
-        if goal.issubset(state):
-            print("Estados expandidos por forwardBFS:", expanded)
-            print("Longitud del plan:", len(plan))
-            return plan
+                if hasattr(problem, "isGoalState"):
+                    if problem.isGoalState(next_state):
+                        return new_plan
+                else:
+                    goal = problem.goal if hasattr(problem, "goal") else problem.goal_state
+                    if goal.issubset(next_state):
+                        return new_plan
 
-        for successor in problem.getSuccessors(state):
-            next_state = successor[0]
-            action = successor[1]
+                visited.add(next_state)
+                frontier.append((next_state, new_plan))
 
-            next_state = frozenset(next_state)
-
-            if next_state in visited:
-                continue
-
-            visited.add(next_state)
-            frontier.push((next_state, plan + [action]))
-
-    print("No se encontró solución con forwardBFS.")
-    print("Estados expandidos:", expanded)
     return []
     
     ### End of your code ###
@@ -199,61 +197,21 @@ def regress(goal_set: State, action: Action) -> State | None:
          Check relevance first, then check for contradictions, then compute.
     """
     ### Your code here ###
-    
-    goal = frozenset(goal_set)
+    goal_set = frozenset(goal_set)
+    add_list = frozenset(action.add_list)
+    del_list = frozenset(action.del_list)
+    precond_pos = frozenset(action.precond_pos)
 
-    def get_attr(obj, names, default=None):
-        for name in names:
-            if hasattr(obj, name):
-                return getattr(obj, name)
-        return default
-
-    pre_pos = frozenset(
-        get_attr(
-            action,
-            ["precond_pos", "positive_preconditions", "preconditions_pos", "preconditions", "precond"],
-            []
-        )
-    )
-
-    pre_neg = frozenset(
-        get_attr(
-            action,
-            ["precond_neg", "negative_preconditions", "preconditions_neg"],
-            []
-        )
-    )
-
-    add_list = frozenset(
-        get_attr(
-            action,
-            ["add_list", "add_effects", "add", "effects_add"],
-            []
-        )
-    )
-
-    del_list = frozenset(
-        get_attr(
-            action,
-            ["del_list", "delete_list", "delete_effects", "delete", "effects_del"],
-            []
-        )
-    )
-
-    if not (add_list & goal):
+    # La acción debe aportar al menos un fluente del objetivo actual.
+    if not (add_list & goal_set):
         return None
 
-    if del_list & goal:
+    # La acción no puede borrar algo que debe seguir siendo verdad.
+    if del_list & goal_set:
         return None
 
-    new_goal = (goal - add_list) | pre_pos
-
-    if new_goal & pre_neg:
-        return None
-
-    return frozenset(new_goal)
-
-
+    # REGRESS(g, a) = (g − ADD(a)) ∪ PRECOND_pos(a)
+    return (goal_set - add_list) | precond_pos
     ### End of your code ###
 
 
@@ -276,346 +234,108 @@ def backwardSearch(problem: Problem) -> list[Action]:
          Pickable) that are false in the initial state — these are dead ends.
     """
     ### Your code here ###
-    from collections import deque
+    from planning.pddl import get_all_groundings
 
-    # Obtener estado inicial real
-    if hasattr(problem, "getStartState"):
-        initial_state = problem.getStartState()
-    elif hasattr(problem, "get_start_state"):
-        initial_state = problem.get_start_state()
-    else:
-        initial_state = problem.initial_state
+    initial_state = problem.initial_state
+    goal = problem.goal
 
-    goal = frozenset(problem.goal)
+    if goal.issubset(initial_state):
+        return []
 
-    robot = "robot"
-    expanded = 0
+    static_preds = {"MedicalPost", "Adjacent", "Pickable"}
 
-    # ------------------------------------------------------------
-    # Auxiliares internos
-    # ------------------------------------------------------------
+    medical_posts: frozenset = frozenset(
+        f[1] for f in initial_state if f[0] == "MedicalPost"
+    )
+    obj_initial: dict[str, set] = {}
+    for f in initial_state:
+        if f[0] == "At" and f[1] != "robot":
+            obj_initial.setdefault(f[1], set()).add(f[2])
 
-    def iter_fluents(state):
-        """
-        Permite manejar tanto State como set/list/frozenset.
-        """
-        if hasattr(state, "fluents"):
-            return state.fluents
-        return state
+    def valid_obj_loc(obj: str, loc) -> bool:
+        return loc in obj_initial.get(obj, set()) or loc in medical_posts
 
-    def state_key(state):
-        return frozenset(iter_fluents(state))
+    def simplify(goal_desc: frozenset) -> frozenset | None:
+        result = set()
+        robot_locs: set = set()
+        held_objs: set = set()
 
-    def is_action_obj(x):
-        """
-        Detecta si x parece una acción.
-        """
-        if hasattr(x, "name"):
-            return True
+        for f in goal_desc:
+            if f[0] in static_preds:
+                if f not in initial_state:
+                    return None
+            elif f[0] == "Free":
+                pass
+            else:
+                if f[0] == "At" and f[1] != "robot":
+                    if not valid_obj_loc(f[1], f[2]):
+                        return None
+                result.add(f)
+                if f[0] == "At" and f[1] == "robot":
+                    robot_locs.add(f[2])
+                elif f[0] == "Holding" and f[1] == "robot":
+                    held_objs.add(f[2])
 
-        text = str(x)
-        primitive_names = ["Move", "PickUp", "PutDown", "Rescue", "SetupSupplies"]
+        if len(robot_locs) > 1 or len(held_objs) > 1:
+            return None
 
-        for name in primitive_names:
-            if text.startswith(name + "(") or text.startswith(name):
-                return True
+        return frozenset(result)
 
-        return False
+    all_actions = get_all_groundings(problem.domain, problem.objects)
 
-    def unpack_successor(successor):
-        """
-        Detecta robustamente el formato del sucesor.
+    from collections import defaultdict
+    add_index: dict = defaultdict(list)
+    for a in all_actions:
+        for f in a.add_list:
+            add_index[f].append(a)
 
-        Posibles formatos:
-        - (next_state, action, cost)
-        - (action, next_state, cost)
-        - (next_state, action)
-        - (action, next_state)
-        """
+    start_goal = simplify(goal)
+    if start_goal is None:
+        return []
+    if start_goal.issubset(initial_state):
+        return []
 
-        items = list(successor)
+    parent: dict = {start_goal: None}
+    frontier = deque([start_goal])
 
-        action = None
-        next_state = None
+    def reconstruct(g: frozenset, last_action: Action) -> list[Action]:
+        plan = [last_action]
+        node = g
+        while parent[node] is not None:
+            prev_goal, act = parent[node]
+            plan.append(act)
+            node = prev_goal
+        return plan
 
-        for item in items:
-            if is_action_obj(item):
-                action = item
-                break
+    while frontier:
+        current_goal = frontier.popleft()
 
-        for item in items:
-            if item is not action and not isinstance(item, (int, float)):
-                next_state = item
-                break
+        seen_actions: set = set()
+        for f in current_goal:
+            for action in add_index.get(f, []):
+                if id(action) in seen_actions:
+                    continue
+                seen_actions.add(id(action))
 
-        if action is None or next_state is None:
-            raise ValueError("Formato de sucesor no reconocido: " + str(successor))
-
-        return next_state, action
-
-    def action_name(action):
-        if hasattr(action, "name"):
-            text = str(action.name)
-        else:
-            text = str(action)
-
-        # Quita espacios
-        text = text.strip()
-
-        # Si viene como "Move(robot, ...)", dejar solo "Move"
-        if "(" in text:
-            text = text.split("(")[0].strip()
-
-        # Si viene como "Move robot ...", dejar solo "Move"
-        if " " in text:
-            text = text.split()[0].strip()
-
-        return text
-
-    def get_robot_loc(state):
-        for fluent in iter_fluents(state):
-            if len(fluent) == 3 and fluent[0] == "At" and fluent[1] == robot:
-                return fluent[2]
-        return None
-
-    def get_obj_loc(state, obj):
-        for fluent in iter_fluents(state):
-            if len(fluent) == 3 and fluent[0] == "At" and fluent[1] == obj:
-                return fluent[2]
-        return None
-
-    def get_patient():
-        for fluent in goal:
-            if len(fluent) == 2 and fluent[0] == "Rescued":
-                return fluent[1]
-        return None
-
-    def get_medical_post():
-        for fluent in iter_fluents(initial_state):
-            if len(fluent) == 2 and fluent[0] == "MedicalPost":
-                return fluent[1]
-        return None
-
-    def get_supplies():
-        for fluent in iter_fluents(initial_state):
-            if len(fluent) == 3 and fluent[0] == "At":
-                obj = fluent[1]
-                if isinstance(obj, str) and obj.startswith("supplies"):
-                    return obj
-        return None
-
-    def move_to(start_state, target_loc):
-        """
-        BFS hacia adelante solo con acciones Move.
-
-        Esta parte usa los sucesores del problema, igual que forwardBFS,
-        pero filtra únicamente movimientos.
-        """
-
-        nonlocal expanded
-
-        if get_robot_loc(start_state) == target_loc:
-            return [], start_state
-
-        frontier = deque()
-        frontier.append((start_state, []))
-
-        visited = set()
-        visited.add(state_key(start_state))
-
-        while frontier:
-            current_state, path = frontier.popleft()
-            expanded += 1
-
-            if get_robot_loc(current_state) == target_loc:
-                return path, current_state
-
-            successors = problem.getSuccessors(current_state)
-
-            for successor in successors:
-                next_state, action = unpack_successor(successor)
-
-                name = action_name(action).lower()
-
-                if name != "move":
+                new_goal_raw = regress(current_goal, action)
+                if new_goal_raw is None:
                     continue
 
-                key = state_key(next_state)
-
-                if key in visited:
+                new_goal = simplify(new_goal_raw)
+                if new_goal is None:
                     continue
 
-                visited.add(key)
-                frontier.append((next_state, path + [action]))
+                if new_goal in parent:
+                    continue
 
-        return None, start_state
+                parent[new_goal] = (current_goal, action)
 
-    def apply_action_by_effect(start_state, required_action_name, required_effect):
-        """
-        Busca una acción aplicable que produzca required_effect.
-        """
+                if new_goal.issubset(initial_state):
+                    return reconstruct(current_goal, action)
 
-        nonlocal expanded
+                frontier.append(new_goal)
 
-        successors = problem.getSuccessors(start_state)
-
-        for successor in successors:
-            next_state, action = unpack_successor(successor)
-            expanded += 1
-
-            name = action_name(action).lower()
-
-            if name != required_action_name.lower():
-                continue
-
-            if required_effect in state_key(next_state):
-                return action, next_state
-
-        return None, start_state
-
-    # ------------------------------------------------------------
-    # Extraer datos del problema
-    # ------------------------------------------------------------
-
-    patient = get_patient()
-    supplies = get_supplies()
-    medical_post = get_medical_post()
-
-    if patient is None:
-        print("No se encontró paciente en el objetivo.")
-        return []
-
-    if supplies is None:
-        print("No se encontraron suministros.")
-        return []
-
-    if medical_post is None:
-        print("No se encontró puesto médico.")
-        return []
-
-    patient_loc = get_obj_loc(initial_state, patient)
-    supplies_loc = get_obj_loc(initial_state, supplies)
-
-    if patient_loc is None:
-        print("No se encontró la posición inicial del paciente.")
-        return []
-
-    if supplies_loc is None:
-        print("No se encontró la posición inicial de los suministros.")
-        return []
-
-    # ------------------------------------------------------------
-    # Construcción del plan
-    # ------------------------------------------------------------
-
-    current_state = initial_state
-    plan = []
-
-    # 1. Ir hacia los suministros
-    moves, current_state = move_to(current_state, supplies_loc)
-
-    if moves is None:
-        print("No hay camino hacia los suministros.")
-        return []
-
-    plan.extend(moves)
-
-    # 2. Recoger suministros
-    action, current_state = apply_action_by_effect(
-        current_state,
-        "PickUp",
-        ("Holding", robot, supplies)
-    )
-
-    if action is None:
-        print("No se pudo recoger los suministros.")
-        return []
-
-    plan.append(action)
-
-    # 3. Ir al puesto médico con los suministros
-    moves, current_state = move_to(current_state, medical_post)
-
-    if moves is None:
-        print("No hay camino hacia el puesto médico.")
-        return []
-
-    plan.extend(moves)
-
-    # 4. Preparar suministros
-    action, current_state = apply_action_by_effect(
-        current_state,
-        "SetupSupplies",
-        ("SuppliesReady", medical_post)
-    )
-
-    if action is None:
-        print("No se pudieron preparar los suministros.")
-        return []
-
-    plan.append(action)
-
-    # 5. Ir hacia el paciente
-    moves, current_state = move_to(current_state, patient_loc)
-
-    if moves is None:
-        print("No hay camino hacia el paciente.")
-        return []
-
-    plan.extend(moves)
-
-    # 6. Recoger paciente
-    action, current_state = apply_action_by_effect(
-        current_state,
-        "PickUp",
-        ("Holding", robot, patient)
-    )
-
-    if action is None:
-        print("No se pudo recoger el paciente.")
-        return []
-
-    plan.append(action)
-
-    # 7. Llevar paciente al puesto médico
-    moves, current_state = move_to(current_state, medical_post)
-
-    if moves is None:
-        print("No hay camino del paciente al puesto médico.")
-        return []
-
-    plan.extend(moves)
-
-    # 8. Dejar paciente en puesto médico
-    action, current_state = apply_action_by_effect(
-        current_state,
-        "PutDown",
-        ("At", patient, medical_post)
-    )
-
-    if action is None:
-        print("No se pudo dejar el paciente en el puesto médico.")
-        return []
-
-    plan.append(action)
-
-    # 9. Rescatar paciente
-    action, current_state = apply_action_by_effect(
-        current_state,
-        "Rescue",
-        ("Rescued", patient)
-    )
-
-    if action is None:
-        print("No se pudo rescatar el paciente.")
-        return []
-
-    plan.append(action)
-
-    print("Objetivos expandidos por backwardSearch:", expanded)
-    print("Longitud del plan:", len(plan))
-
-    return plan
+    return []
     ### End of your code ###
 
 # ---------------------------------------------------------------------------
@@ -650,5 +370,6 @@ def aStarPlanner(
 # Aliases used by the command-line argument parser
 tinyBaseSearch = tinyBaseSearch
 forwardBFS = forwardBFS
+forwardSearch = forwardBFS   # alias for CLI compatibility
 backwardSearch = backwardSearch
 aStarPlanner = aStarPlanner

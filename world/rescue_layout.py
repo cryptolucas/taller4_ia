@@ -84,17 +84,9 @@ def get_layout(name: str) -> RescueLayout | None:
     return None
 
 
-def _try_load(filename):
-    with open(filename) as f:
-        lines = [line.rstrip("\n") for line in f if line.rstrip("\n") != ""]
+def _try_load(fullname: str) -> RescueLayout | None:
+    if not os.path.exists(fullname):
+        return None
+    with open(fullname) as f:
+        return RescueLayout([line.rstrip("\n") for line in f])
 
-    # Formatear el layout para que todas las filas tengan el mismo ancho
-    max_width = max(len(line) for line in lines)
-
-    formatted_lines = []
-    for line in lines:
-        if len(line) < max_width:
-            line = line + ("%" * (max_width - len(line)))
-        formatted_lines.append(line)
-
-    return RescueLayout(formatted_lines)
