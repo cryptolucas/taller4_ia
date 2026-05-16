@@ -339,32 +339,51 @@ def backwardSearch(problem: Problem) -> list[Action]:
     ### End of your code ###
 
 # ---------------------------------------------------------------------------
-# Punto 4 – A* Planner
+# Punto 4 – A* Planner 
 # ---------------------------------------------------------------------------
-
-# Heuristic signature:  heuristic(state, goal, domain, objects) -> float
-Heuristic = Callable[[State, State, list[ActionSchema], Objects], float]
-
 
 def aStarPlanner(
     problem: Problem,
     heuristic: Heuristic = nullHeuristic,
 ) -> list[Action]:
-    """
-    Forward A* search guided by a heuristic.
-
-    Combines the real accumulated cost g(n) with the heuristic estimate h(n)
-    to prioritize which state to expand next: f(n) = g(n) + h(n).
-
-    Returns a list of Action objects forming a valid plan, or [] if no plan exists.
-
-    Tip: The heuristic signature is heuristic(state, goal, domain, objects) → float.
-         Use PriorityQueue with priority = g + h(next_state).
-         Track the best g-cost seen for each state to avoid stale expansions.
-    """
-    ### Your code here ###
-
-    ### End of your code ###
+    initial_state = problem.initial_state
+    
+    if hasattr(problem, "isGoalState"):
+        is_goal = problem.isGoalState
+    else:
+        goal_target = problem.goal if hasattr(problem, "goal") else problem.goal_state
+        is_goal = lambda s: goal_target.issubset(s)
+        
+    if is_goal(initial_state):
+        return []
+        
+    frontier = PriorityQueue()
+    goal = problem.goal if hasattr(problem, "goal") else problem.goal_state
+    
+    h_initial = heuristic(initial_state, goal, problem.domain, problem.objects)
+    frontier.push((initial_state, []), h_initial)
+    
+    g_cost = {initial_state: 0}
+    
+    while not frontier.isEmpty():
+        state, plan = frontier.pop()
+        
+        if len(plan) > g_cost.get(state, float('inf')):
+            continue
+            
+        if is_goal(state):
+            return plan
+            
+        for next_state, action, cost in problem.getSuccessors(state):
+            new_g_cost = g_cost[state] + cost
+            
+            if next_state not in g_cost or new_g_cost < g_cost[next_state]:
+                g_cost[next_state] = new_g_cost
+                h = heuristic(next_state, goal, problem.domain, problem.objects)
+                f = new_g_cost + h
+                frontier.push((next_state, plan + [action]), f)
+                
+    return []
 
 
 # Aliases used by the command-line argument parser
